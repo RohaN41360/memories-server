@@ -13,6 +13,8 @@ const fs = require('fs');
 const uploadPath = 'uploads/';
 const bcrypt = require('bcryptjs');
 var jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+app.use(cookieParser());
 
 // Configure Cloudinary
 cloudinary.config({
@@ -38,6 +40,7 @@ const mediaSchema = new mongoose.Schema({
     name: String,
     description: String,
     url: String,
+    public_id:String,
     likes:{
         type: Number,
         default: 0
@@ -91,36 +94,57 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 module.exports = User;
 
-  
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (token == null) return res.sendStatus(401);
+const authMiddleware = async (req, res, next) => {
+  // Retrieve token from cookies
+  const token = req.header("Authorization");
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-};
+  // Check if token exists
+  if (!token) {
+      // Token is missing, return unauthorized error
+      return res.status(401).json({ error: 'Please Login' });
+  }
+
+  try {
+      const isValidToken = jwt.verify(token, process.env.JWT_SECRET);
+      // console.log("Decoded token:", isValidToken); // Add this line to log the decoded token
+      const userData = await User.findOne({ _id: isValidToken.userId }).select({ password: 0, })
+      req.user = userData;
+      req.token = token;  
+      req.userId = userData._id;
+      next();
+  } catch (error) {
+      console.log("Token verification error:", error); // Log the error
+      return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+
+
+
   // Define a route for file upload
-  app.post('/upload',authenticateToken, upload.single('file'), async (req, res) => {
+  app.post('/upload', authMiddleware ,upload.single('file'), async (req, res) => {
     try {
       // Upload file to Cloudinary
       const result = await cloudinary.uploader.upload(req.file.path,{folder: "memories"});
-  
+      
       // Create a new media object
       const media = new Media({
         name: req.body.name,
         description: req.body.description,
-        url: result.secure_url
+        url: result.secure_url,
+        public_id:result.public_id
       });
   
       // Save the media object to MongoDB
       await media.save();
+
+      const user = await User.findById(req.user._id);
+      user.posts.push(media._id); // Assuming req.user._id contains the logged-in user's ID
+      await user.save();
+
       clearUploadsFolder();
       // console.log({public_id: result.public_id, url: result.secure_url})
-      res.status(200).json({ message: 'File uploaded successfully' });
+      res.status(200).json({ message: 'Post Upload successful' });
 
     } catch (err) {
       console.error(err);
@@ -129,13 +153,13 @@ const authenticateToken = (req, res, next) => {
   });
 
   
-app.get('/getposts',(req,res)=>{
+app.get('/getposts',authMiddleware,(req,res)=>{
         Media.find()
         .then(media =>res.json(media))
         .catch(err =>res.status(400).json('error: '+err))
     })
   
-
+    
 //Update Like count 
 app.patch('/getposts/:id',(req,res)=>{
     const likes = req.body.likes;
@@ -162,6 +186,8 @@ app.delete('/delete/:id', async (req, res) => {
     return res.status(500).json({ msg: err.message });
   }
 });
+
+
 
 
 app.get('/getusers',(req,res)=>{
@@ -195,11 +221,11 @@ app.post("/newuser",upload.single('file'),async (req,res)=>{
   
     const userId = await user.save();
     clearUploadsFolder();
-    const token = jwt.sign({ userId: userId._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ userId: userId._id , userEmail : userId.email}, process.env.JWT_SECRET, { expiresIn: '1h' });
 
     if(user)
     {
-      return res.status(201).json({ message: 'User Created Profile Successfully with Userid '+userId._id });
+      return res.status(201).json({ message: 'User Created Profile Successfully ',token:token});
     }
   } catch (error) {
     console.log(error)
@@ -224,17 +250,66 @@ app.post('/userlogin', async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) { 
-      return res.status(401).json({ message: 'Invalid password' });
+      return res.status(401).json({ message: 'Invalid Credentials' });
     }
 
     // Generate JWT token
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
+    // Store token in cookies
+    // res.cookie('token', token, { httpOnly: true, maxAge: 3600000 }); // Expires in 1 hour (3600000 ms)
+
+    // Respond with token
     res.status(200).json({ token });
+    
     
   } catch (error) {
     console.error('Error logging in:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+//logout
+app.post("/logout",(req, res) => {
+  // Clear token cookie
+  res.clearCookie('token');
+
+  // Optionally, you may redirect the user to a login page or send a response indicating successful logout
+  res.status(200).json({ message: 'Logout successful' });
+});
+
+//get User
+app.get('/user',authMiddleware,(req,res)=>{
+  try {
+    const userData = req.user;
+    res.status(200).json({msg:userData})
+  } catch (error) {
+    console.log(error)
+  }
+})
+
+// Assuming you have already defined the Media and User models
+
+// GET method to retrieve all posts made by a particular user
+app.get('/user/:username/posts', authMiddleware,async (req, res) => {
+  try {
+    // Find the user by username
+    const user = await User.findOne({ username: req.params.username });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Extract post ids from the user's posts array
+    const postIds = user.posts;
+
+    // Find posts data from the Media collection using the post ids
+    const postsData = await Media.find({ _id: { $in: postIds } });
+
+    res.status(200).json({ posts: postsData });
+  } catch (error) {
+    console.error('Error fetching user posts:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
