@@ -35,23 +35,6 @@ mongoose.connect(URI)
 
 // Configure multer for file upload
 const upload = multer({ dest: 'uploads/' });
-// Create a Mongoose schema
-const mediaSchema = new mongoose.Schema({
-    name: String,
-    description: String,
-    url: String,
-    public_id:String,
-    likes:{
-        type: Number,
-        default: 0
-    }
-  },
-  {
-    timestamps: true //important
-});
-  
-  // Create a Mongoose model
-  const Media = mongoose.model('Media', mediaSchema);
 
 
 // Define the User Schema
@@ -90,9 +73,31 @@ const userSchema = new mongoose.Schema({
   }]
 });
 
+
 // Define and export the User model
 const User = mongoose.model('User', userSchema);
 module.exports = User;
+
+// Create a Mongoose schema Media
+const mediaSchema = new mongoose.Schema({
+  name: String,
+  description: String,
+  url: String,
+  public_id:String,
+  likes:{
+      type: Number,
+      default: 0
+  },
+  user: userSchema
+},
+{
+  timestamps: true //important
+});
+
+// Create a Mongoose model
+const Media = mongoose.model('Media', mediaSchema);
+
+
 
 const authMiddleware = async (req, res, next) => {
   // Retrieve token from cookies
@@ -122,35 +127,45 @@ const authMiddleware = async (req, res, next) => {
 
 
   // Define a route for file upload
-  app.post('/upload', authMiddleware ,upload.single('file'), async (req, res) => {
+  app.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
     try {
-      // Upload file to Cloudinary
-      const result = await cloudinary.uploader.upload(req.file.path,{folder: "memories"});
-      
-      // Create a new media object
-      const media = new Media({
-        name: req.body.name,
-        description: req.body.description,
-        url: result.secure_url,
-        public_id:result.public_id
-      });
-  
-      // Save the media object to MongoDB
-      await media.save();
+        // Upload file to Cloudinary
+        const result = await cloudinary.uploader.upload(req.file.path, { folder: "memories" });
 
-      const user = await User.findById(req.user._id);
+        // Create a new media object with user details
+        const media = new Media({
+            name: req.body.name,
+            description: req.body.description,
+            url: result.secure_url,
+            public_id: result.public_id
+        });
+
+        // Save the media object to MongoDB
+        await media.save();
+
+        // Find the user without selecting the password and posts
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            throw new Error("User not found");
+        }
+
+        // Add user details to the media object
+        media.user = user;
+        // Save the media object again to include user details
+        await media.save();
+
       user.posts.push(media._id); // Assuming req.user._id contains the logged-in user's ID
       await user.save();
 
-      clearUploadsFolder();
-      // console.log({public_id: result.public_id, url: result.secure_url})
-      res.status(200).json({ message: 'Post Upload successful' });
+        clearUploadsFolder();
+        res.status(200).json({ message: 'Post Upload successful' });
 
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'An error occurred' });
+        console.error(err);
+        res.status(500).json({ error: 'An error occurred' });
     }
-  });
+});
+
 
   
 app.get('/getposts',authMiddleware,(req,res)=>{
@@ -159,6 +174,21 @@ app.get('/getposts',authMiddleware,(req,res)=>{
         .catch(err =>res.status(400).json('error: '+err))
     })
   
+
+// Get user details by ID
+app.get('/users/:id', (req, res) => {
+  // Assuming you have a User model
+  User.findById(req.params.id)
+      .then(user => {
+          if (!user) {
+              return res.status(404).json({ message: 'User not found' });
+          }
+          // Return the user details
+          res.json(user);
+      })
+      .catch(err => res.status(400).json({ message: 'Error fetching user details', error: err }));
+});
+
     
 //Update Like count 
 app.patch('/getposts/:id',(req,res)=>{
@@ -197,42 +227,42 @@ app.get('/getusers',(req,res)=>{
 })
 
 //register new user
-app.post("/newuser",upload.single('file'),async (req,res)=>{
+app.post("/newuser", upload.single('file'), async (req, res) => {
   try {
-
-    const { username, email, password, firstname,lastname } = req.body;
+    const { username, email, password, firstname, lastname } = req.body;
     const existingEmail = await User.findOne({ email });
     const existingUsername = await User.findOne({ username });
-    // Upload file to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path,{folder: "memories"});
 
-    if(existingEmail)
-    {
+    if (existingEmail) {
       return res.status(400).json({ message: 'User with the same email already exists' });
     }
-    if(existingUsername)
-    {
+    if (existingUsername) {
       return res.status(400).json({ message: 'User with the same Username already exists' });
     }
-    const hashedPassword = await bcrypt.hash(password, 10); 
-    const user  = new User({
-      username, email, password:hashedPassword, firstname,lastname,profilePicture:result.secure_url 
-    });
-  
-    const userId = await user.save();
-    clearUploadsFolder();
-    const token = jwt.sign({ userId: userId._id , userEmail : userId.email}, process.env.JWT_SECRET, { expiresIn: '1h' });
 
-    if(user)
-    {
-      return res.status(201).json({ message: 'User Created Profile Successfully ',token:token});
+    let profilePicture;
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(req.file.path, { folder: "memories" });
+      profilePicture = result.secure_url;
+      clearUploadsFolder();
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({
+      username, email, password: hashedPassword, firstname, lastname, profilePicture
+    });
+
+    const userId = await user.save();
+    const token = jwt.sign({ userId: userId._id, userEmail: userId.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+    return res.status(201).json({ message: 'User Created Profile Successfully', token: token });
+
   } catch (error) {
-    console.log(error)
+    console.log(error);
     return res.status(500).json({ error: `An error occurred ${error}` });
   }
-
 })
+
 
 // POST route for user login
 app.post('/userlogin', async (req, res) => {
