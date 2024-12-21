@@ -64,7 +64,7 @@ const userSchema = new mongoose.Schema({
   },
    profilePicture: {
     type: String, // Store the URL of the profile picture
-    default: 'default_profile_picture_url.jpg' // You can set a default image URL if none is provided
+    default: 'https://res.cloudinary.com/dxw6gft9d/image/upload/v1717928295/memories/dummyImage_doe6xo.jpg' // You can set a default image URL if none is provided
   },
   // Posts made by the user
   posts: [{
@@ -98,30 +98,35 @@ const mediaSchema = new mongoose.Schema({
 const Media = mongoose.model('Media', mediaSchema);
 
 
-
 const authMiddleware = async (req, res, next) => {
-  // Retrieve token from cookies
-  const token = req.header("Authorization");
+  // Retrieve token from Authorization header
+  const authHeader = req.header("Authorization");
 
-  // Check if token exists
-  if (!token) {
-      // Token is missing, return unauthorized error
-      return res.status(401).json({ error: 'Please Login' });
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    // Token is missing or improperly formatted
+    return res.status(401).json({ error: 'Please Login' });
   }
+
+  // Extract the token part
+  const token = authHeader.split(" ")[1];
 
   try {
-      const isValidToken = jwt.verify(token, process.env.JWT_SECRET);
-      // console.log("Decoded token:", isValidToken); // Add this line to log the decoded token
-      const userData = await User.findOne({ _id: isValidToken.userId }).select({ password: 0, })
-      req.user = userData;
-      req.token = token;  
-      req.userId = userData._id;
-      next();
+    const isValidToken = jwt.verify(token, process.env.JWT_SECRET);
+
+    const userData = await User.findOne({ _id: isValidToken.userId }).select({ password: 0 });
+    if (!userData) {
+      return res.status(401).json({ error: 'Invalid token or user not found' });
+    }
+
+    req.user = userData;
+    req.token = token;
+    req.userId = userData._id;
+    next();
   } catch (error) {
-      console.log("Token verification error:", error); // Log the error
-      return res.status(401).json({ error: 'Invalid token' });
+    console.error("Token verification error:", error);
+    return res.status(401).json({ error: 'Invalid token' });
   }
-}
+};
 
 
 
@@ -318,7 +323,6 @@ app.get('/user',authMiddleware,(req,res)=>{
   }
 })
 
-// Assuming you have already defined the Media and User models
 
 // GET method to retrieve all posts made by a particular user
 app.get('/user/:username/posts', authMiddleware,async (req, res) => {
