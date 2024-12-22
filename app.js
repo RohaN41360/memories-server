@@ -258,7 +258,7 @@ app.post("/newuser", upload.single('file'), async (req, res) => {
     });
 
     const userId = await user.save();
-    const token = jwt.sign({ userId: userId._id, userEmail: userId.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign({ userId: userId._id, userEmail: userId.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     return res.status(201).json({ message: 'User Created Profile Successfully', token: token });
 
@@ -322,6 +322,64 @@ app.get('/user',authMiddleware,(req,res)=>{
     console.log(error)
   }
 })
+
+
+// Update user profile details
+// Update existing user profile
+app.patch("/updateuserprofile/:id", upload.single('file'), async (req, res) => {
+  try {
+    const { username, email, password, firstname, lastname } = req.body;
+    const { id } = req.params;
+
+    // Check if the user exists by ID
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Check if the email or username already exists, but exclude the current user's email or username
+    const existingEmail = await User.findOne({ email, _id: { $ne: id } });
+    const existingUsername = await User.findOne({ username, _id: { $ne: id } });
+
+    if (existingEmail) {
+      return res.status(400).json({ message: 'User with the same email already exists' });
+    }
+    if (existingUsername) {
+      return res.status(400).json({ message: 'User with the same username already exists' });
+    }
+
+    // If a new file (profile picture) is uploaded, handle it
+    let profilePicture;
+    if (req.file) {
+      const result = await cloudinary.uploader.upload(req.file.path, { folder: "memories" });
+      profilePicture = result.secure_url;
+      clearUploadsFolder(); // Make sure you clean up uploaded files after processing
+    }
+
+    // Update user details
+    if (username) user.username = username;
+    if (email) user.email = email;
+    if (firstname) user.firstname = firstname;
+    if (lastname) user.lastname = lastname;
+    if (password) {
+      // Only update the password if provided, hash it before saving
+      user.password = await bcrypt.hash(password, 10);
+    }
+    if (profilePicture) user.profilePicture = profilePicture;
+
+    // Save the updated user
+    await user.save();
+
+    // Optionally, generate a new token if necessary (if you want the user to have a refreshed token after updating profile)
+    const token = jwt.sign({ userId: user._id, userEmail: user.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+
+    return res.status(200).json({ message: 'Profile updated successfully', token: token });
+
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: `An error occurred: ${error.message}` });
+  }
+});
 
 
 // GET method to retrieve all posts made by a particular user
