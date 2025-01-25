@@ -62,9 +62,13 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-   profilePicture: {
-    type: String, // Store the URL of the profile picture
-    default: 'https://res.cloudinary.com/dxw6gft9d/image/upload/v1717928295/memories/dummyImage_doe6xo.jpg' // You can set a default image URL if none is provided
+  bio: {
+    type: String,
+    default: ''
+  },
+  profilePicture: {
+    type: String,
+    default: 'https://res.cloudinary.com/dxw6gft9d/image/upload/v1717928295/memories/dummyImage_doe6xo.jpg'
   },
   // Posts made by the user
   posts: [{
@@ -99,33 +103,39 @@ const Media = mongoose.model('Media', mediaSchema);
 
 
 const authMiddleware = async (req, res, next) => {
-  // Retrieve token from Authorization header
-  const authHeader = req.header("Authorization");
+    try {
+        const authHeader = req.headers.authorization;
+        
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ message: 'Authorization header missing or invalid' });
+        }
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    // Token is missing or improperly formatted
-    return res.status(401).json({ error: 'Please Login' });
-  }
+        const token = authHeader.split(' ')[1];
+        
+        if (!token) {
+            return res.status(401).json({ message: 'No token provided' });
+        }
 
-  // Extract the token part
-  const token = authHeader.split(" ")[1];
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const user = await User.findById(decoded.userId).select('-password');
+            
+            if (!user) {
+                return res.status(401).json({ message: 'User not found' });
+            }
 
-  try {
-    const isValidToken = jwt.verify(token, process.env.JWT_SECRET);
-
-    const userData = await User.findOne({ _id: isValidToken.userId }).select({ password: 0 });
-    if (!userData) {
-      return res.status(401).json({ error: 'Invalid token or user not found' });
+            req.user = user;
+            next();
+        } catch (error) {
+            if (error.name === 'TokenExpiredError') {
+                return res.status(401).json({ message: 'Token expired' });
+            }
+            return res.status(401).json({ message: 'Invalid token' });
+        }
+    } catch (error) {
+        console.error('Auth Middleware Error:', error);
+        res.status(500).json({ message: 'Server error in authentication' });
     }
-
-    req.user = userData;
-    req.token = token;
-    req.userId = userData._id;
-    next();
-  } catch (error) {
-    console.error("Token verification error:", error);
-    return res.status(401).json({ error: 'Invalid token' });
-  }
 };
 
 
@@ -181,17 +191,16 @@ app.get('/getposts',authMiddleware,(req,res)=>{
   
 
 // Get user details by ID
-app.get('/users/:id', (req, res) => {
-  // Assuming you have a User model
-  User.findById(req.params.id)
-      .then(user => {
-          if (!user) {
-              return res.status(404).json({ message: 'User not found' });
-          }
-          // Return the user details
-          res.json(user);
-      })
-      .catch(err => res.status(400).json({ message: 'Error fetching user details', error: err }));
+app.get('/users/:id', async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id).select('-password');
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        res.json(user);
+    } catch (err) {
+        res.status(400).json({ message: 'Error fetching user details', error: err });
+    }
 });
 
     
@@ -208,28 +217,60 @@ app.patch('/getposts/:id',(req,res)=>{
 
 })
 
-app.delete('/delete/:id', async (req, res) => {
+app.delete('/posts/:id', authMiddleware, async (req, res) => {
   try {
-    const media = await Media.findByIdAndDelete(req.params.id);
+    // Find the post first to get its details
+    const post = await Media.findById(req.params.id);
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
 
-    const publicId = extractPublicId(media.url);
-  
-    
+    // Verify that the user owns this post
+    if (post.user._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ error: 'Not authorized to delete this post' });
+    }
 
-    res.json({ msg: 'Deleted a Post', pid: publicId });
-  } catch (err) {
-    return res.status(500).json({ msg: err.message });
+    // Delete the image from Cloudinary using the public_id
+    if (post.public_id) {
+      try {
+        await cloudinary.uploader.destroy(post.public_id);
+      } catch (cloudinaryError) {
+        console.error('Error deleting from Cloudinary:', cloudinaryError);
+        // Continue with post deletion even if Cloudinary deletion fails
+      }
+    }
+
+    // Remove the post reference from the user's posts array
+    await User.findByIdAndUpdate(
+      req.user._id,
+      { $pull: { posts: req.params.id } }
+    );
+
+    // Delete the post from Media collection
+    await Media.findByIdAndDelete(req.params.id);
+
+    res.status(200).json({ 
+      message: 'Post deleted successfully',
+      deletedPost: post
+    });
+
+  } catch (error) {
+    console.error('Error deleting post:', error);
+    res.status(500).json({ error: 'An error occurred while deleting the post' });
   }
 });
 
 
 
 
-app.get('/getusers',(req,res)=>{
-  User.find()
-  .then(user =>res.json(user))
-  .catch(err =>res.status(400).json('error: '+err))
-})
+app.get('/getusers', async (req, res) => {
+    try {
+        const users = await User.find().select('-password');
+        res.json(users);
+    } catch (err) {
+        res.status(400).json({ error: err });
+    }
+});
 
 //register new user
 app.post("/newuser", upload.single('file'), async (req, res) => {
@@ -271,37 +312,52 @@ app.post("/newuser", upload.single('file'), async (req, res) => {
 
 // POST route for user login
 app.post('/userlogin', async (req, res) => {
-  try {
-    const { usernameOrEmail, password } = req.body;
+    try {
+        const { usernameOrEmail, password } = req.body;
 
-    // Check if a user with the provided username or email exists
-    const user = await User.findOne({ $or: [{ username: usernameOrEmail }, { email: usernameOrEmail }] });
+        // Check if a user with the provided username or email exists
+        const user = await User.findOne({
+            $or: [{ username: usernameOrEmail }, { email: usernameOrEmail }]
+        });
 
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Verify password
+        const isPasswordValid = await bcrypt.compare(password, user.password);
+
+        if (!isPasswordValid) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        // Generate JWT token
+        const token = jwt.sign(
+            { userId: user._id },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
+        // Send response with token and user data (excluding password)
+        const userData = {
+            _id: user._id,
+            username: user.username,
+            email: user.email,
+            firstname: user.firstname,
+            lastname: user.lastname,
+            bio: user.bio,
+            profilePicture: user.profilePicture
+        };
+
+        res.status(200).json({
+            message: 'Login successful',
+            token,
+            user: userData
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ message: 'Internal server error' });
     }
-
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-
-    if (!isPasswordValid) { 
-      return res.status(401).json({ message: 'Invalid Credentials' });
-    }
-
-    // Generate JWT token
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-    // Store token in cookies
-    // res.cookie('token', token, { httpOnly: true, maxAge: 3600000 }); // Expires in 1 hour (3600000 ms)
-
-    // Respond with token
-    res.status(200).json({ token });
-    
-    
-  } catch (error) {
-    console.error('Error logging in:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
 });
 
 //logout
@@ -314,21 +370,22 @@ app.post("/logout",(req, res) => {
 });
 
 //get User
-app.get('/user',authMiddleware,(req,res)=>{
-  try {
-    const userData = req.user;
-    res.status(200).json({msg:userData})
-  } catch (error) {
-    console.log(error)
-  }
-})
+app.get('/user', authMiddleware, (req, res) => {
+    try {
+        // req.user already has password excluded from authMiddleware
+        res.status(200).json({ msg: req.user });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 
 
 // Update user profile details
 // Update existing user profile
 app.patch("/updateuserprofile/:id", upload.single('file'), async (req, res) => {
   try {
-    const { username, email, password, firstname, lastname } = req.body;
+    const { username, email, firstname, lastname, bio } = req.body;
     const { id } = req.params;
 
     // Check if the user exists by ID
@@ -351,9 +408,14 @@ app.patch("/updateuserprofile/:id", upload.single('file'), async (req, res) => {
     // If a new file (profile picture) is uploaded, handle it
     let profilePicture;
     if (req.file) {
-      const result = await cloudinary.uploader.upload(req.file.path, { folder: "memories" });
-      profilePicture = result.secure_url;
-      clearUploadsFolder(); // Make sure you clean up uploaded files after processing
+      try {
+        const result = await cloudinary.uploader.upload(req.file.path, { folder: "memories" });
+        profilePicture = result.secure_url;
+        clearUploadsFolder();
+      } catch (cloudinaryError) {
+        console.error('Cloudinary upload error:', cloudinaryError);
+        return res.status(500).json({ message: 'Error uploading profile picture' });
+      }
     }
 
     // Update user details
@@ -361,23 +423,40 @@ app.patch("/updateuserprofile/:id", upload.single('file'), async (req, res) => {
     if (email) user.email = email;
     if (firstname) user.firstname = firstname;
     if (lastname) user.lastname = lastname;
-    if (password) {
-      // Only update the password if provided, hash it before saving
-      user.password = await bcrypt.hash(password, 10);
-    }
+    if (bio !== undefined) user.bio = bio;
     if (profilePicture) user.profilePicture = profilePicture;
 
     // Save the updated user
     await user.save();
 
-    // Optionally, generate a new token if necessary (if you want the user to have a refreshed token after updating profile)
-    const token = jwt.sign({ userId: user._id, userEmail: user.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    // Generate new token
+    const token = jwt.sign(
+      { userId: user._id, userEmail: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
 
-    return res.status(200).json({ message: 'Profile updated successfully', token: token });
+    // Return success response with user data
+    return res.status(200).json({ 
+      message: 'Profile updated successfully', 
+      token,
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        firstname: user.firstname,
+        lastname: user.lastname,
+        bio: user.bio,
+        profilePicture: user.profilePicture
+      }
+    });
 
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: `An error occurred: ${error.message}` });
+    console.error('Profile update error:', error);
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ message: 'Invalid input data' });
+    }
+    return res.status(500).json({ message: 'An error occurred while updating profile' });
   }
 });
 
@@ -405,6 +484,49 @@ app.get('/user/:username/posts', authMiddleware,async (req, res) => {
   }
 });
 
+
+app.get('/search',authMiddleware, async (req,res)=>{
+  try {
+    const { query } = req.query;
+
+    if (!query || query.trim() === '') {
+      return res.status(400).json({ message: 'Search query cannot be empty.' });
+    }
+
+    const searchRegex = new RegExp(query, 'i');
+
+    // Search users with more fields and include profile information
+    const users = await User.find({
+      $or: [
+        { username: searchRegex },
+        { email: searchRegex },
+        { firstname: searchRegex },
+        { lastname: searchRegex },
+      ],
+    }).select('-password')  // Exclude password but include all other fields
+      .populate({
+        path: 'posts',
+        select: '_id'  // Only get post IDs for counting
+      });
+
+    // Transform the response to include only necessary fields
+    const transformedUsers = users.map(user => ({
+      _id: user._id,
+      username: user.username,
+      firstname: user.firstname,
+      lastname: user.lastname,
+      bio: user.bio,
+      profilePicture: user.profilePicture,
+      posts: user.posts,
+      createdAt: user.createdAt
+    }));
+
+    res.status(200).json(transformedUsers);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'An error occurred while searching for users.' });
+  }
+})
 
 // Helper function to extract public ID from Cloudinary URL
 function extractPublicId(url) {
@@ -439,3 +561,40 @@ clearUploadsFolder();
 app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`)
 })
+
+// Get user profile by username
+app.get('/user/profile/:username', authMiddleware, async (req, res) => {
+  try {
+    const { username } = req.params;
+
+    // Find user by username and exclude password
+    const user = await User.findOne({ username })
+      .select('-password')
+      .populate({
+        path: 'posts',
+        select: '_id name description url likes createdAt',
+        options: { sort: { 'createdAt': -1 } }
+      });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Transform the response to include only necessary fields
+    const userProfile = {
+      _id: user._id,
+      username: user.username,
+      firstname: user.firstname,
+      lastname: user.lastname,
+      bio: user.bio,
+      profilePicture: user.profilePicture,
+      posts: user.posts,
+      isOwnProfile: req.user._id.toString() === user._id.toString()
+    };
+
+    res.status(200).json(userProfile);
+  } catch (error) {
+    console.error('Error fetching user profile:', error);
+    res.status(500).json({ message: 'Error fetching user profile' });
+  }
+});
